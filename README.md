@@ -1,47 +1,27 @@
-# Bunnymark Jai D3D11
-just checking how fast computers go without a slow engine. probably the fastest bunnymark.
+# Bunnymark D3D11
 
-i think this benchmark is cpu bound. there's no SIMD, SOA, Threads, or CPU optimization of any kind when updating bunnies. because i think this is how a real game would work.
+How many bunnies a computer can draw without an engine in the way: each
+falls, bounces off the floor and the walls, and spins, moved on the CPU one
+at a time (no SIMD, no threads), then all of them drawn with one instanced
+draw through Direct3D 11. Hold the left mouse button to add bunnies (10,000 a
+second) where it is; the window's title gives the frames a second, the
+slowest frame's rate, and the bunnies' count. Escape closes it.
 
+There are two versions of it, the same bunnies the same way, with the
+picture in `assets/` shared: the original in Jai (by farzher), and a port to
+'rain.
 
-## Demo
-https://www.youtube.com/watch?v=_cSMGs2LyD8
+## Building
 
+- `jai/`, with #the_compiler(v0.2.30): in `jai/`, run `run.bat` (optimized,
+  `jai first.jai -o`), or `run-debug.bat` (`jai first.jai - DEBUG`: shaders
+  unoptimized, D3D11's debug bindings).
+- `rain/`, on 'rain's D3D11 module, with its Random module's xoshiro256** for
+  the bunnies' randomness: in `rain/`, run `rain -release -run
+  bunnymark.rain` (optimized, through LLVM), or `rain -run bunnymark.rain` (a
+  debug build, with D3D11's debug layer when it's installed).
 
-
-
-#### 1,000 bunnies at 24,000 fps (cpu: 12700, gpu: RX 6800) || 1,000 bunnies at 13,000 fps (cpu: 8700k, gpu: 1070 mini)
-[![bunnymark youtube video](https://github.com/farzher/Bunnymark-Jai-D3D11/assets/1005136/3e284d96-4d22-455a-9a95-66c8bd7952e1)](https://www.youtube.com/watch?v=_cSMGs2LyD8)
-
-#### 50,000 bunnies at 4,000 fps (cpu: 8700k, gpu: 3090) || 50,000 bunnies at 4,000 fps (cpu: 12700, gpu: RX 6800)
-[![bunnymark youtube video](https://i.imgur.com/QszPnXp.png)](https://www.youtube.com/watch?v=_cSMGs2LyD8)
-
-#### 3,607,125 bunnies at 60 fps (cpu: 8700k, gpu: 3090) || 3,500,000 bunnies at 60 fps (cpu: 12700, gpu: RX 6800)
-[![bunnymark youtube video](https://github.com/farzher/Bunnymark-Jai-D3D11/assets/1005136/13116875-dfc3-49cc-9ad4-6b92720aaf53)](https://www.youtube.com/watch?v=_cSMGs2LyD8)
-
-
-# Download the exe
-https://github.com/farzher/Bunnymark-Jai-D3D11/releases/download/v0.0.3/bunnymark.exe
-
-
-
-### Build From Source
-
-Two versions of the same benchmark, the same bunnies the same way, with the
-picture in `assets/` shared:
-
-- `jai/`: the original, brought up to date for the current Jai compiler.
-  0. have #the_compiler(v0.2.30)
-  1. in `jai/`, run `run.bat` (optimized, `jai first.jai -o`), or
-     `run-debug.bat` (`jai first.jai - DEBUG`: shaders unoptimized, D3D11's
-     debug bindings)
-- `rain/`: a port to 'rain, on its D3D11 module, with its Random module's
-  xoshiro256** for the bunnies' randomness.
-  1. in `rain/`, run `rain -release -run bunnymark.rain` (optimized, through
-     LLVM), or `rain -run bunnymark.rain` (a debug build, with D3D11's debug
-     layer when it's installed)
-
-### Automated runs
+## Automated runs
 
 Either version, given `-auto`, runs unattended: as if the left button were
 held throughout, with the mouse at a random place in the window each frame,
