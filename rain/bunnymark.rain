@@ -1,0 +1,318 @@
+// Bunnymark in 'rain, with Direct3D 11: the Jai version (../jai) step for
+// step. Hold the left mouse button to add bunnies (10,000 a second) where it
+// is; each falls, bounces off the floor and the walls, and spins, moved on
+// the CPU one at a time (no SIMD, no threads), then all of them drawn with
+// one instanced draw. The window's title says the frames a second, the
+// worst frame's rate since the last, and how many bunnies there are. Escape
+// closes it.
+//
+//     rain -run bunnymark.rain                  a debug build
+//     rain -release -run bunnymark.rain         optimized (through LLVM), as the Jai version's -o
+//     rain -release -profile bunnymark.rain -auto -seconds:20
+//
+// (From this folder; the bunnies' picture is ../assets/bunnies.png, built in.)
+//
+// -auto runs it unattended, as the Jai version's does: as if the left button
+// were held throughout, with the mouse at a random place in the window each
+// frame, adding bunnies by the time since the first frame (10,000 a second),
+// so every run has as many at the same time, however fast it goes. It ends
+// after -seconds:N (20), then prints each second's bunnies, frames and
+// slowest frame: only then, so printing costs the run nothing.
+
+Bunnymark :: program {
+    executable: "bunnymark"
+    subsystem: .WINDOWS
+    os: .WINDOWS
+    debug {
+        mode: .DEBUG
+    }
+    release {
+        mode: .RELEASE
+        optimization: .SPEED
+    }
+}
+
+#import Window
+#import D3D11
+#import Image_Files
+#import Time
+#import Random
+#import Wide
+#import String
+#import Console
+
+WINDOW_SIZE               :: Wide.i32x2⟨1920 / 2, 1080 / 2⟩
+VSYNC                     :: false
+MAX_BUNNIES               :: 2_000_000     // the instance buffer's room
+INITIAL_BUNNY_COUNT       :: 1
+BUNNIES_TO_ADD_PER_SECOND :: 10_000
+GRAVITY                   : f32 : 3       // (the Jai version's 33/10 divides integers: 3)
+
+BUNNIES_PNG :: #data "../assets/bunnies.png"
+
+// What the GPU has of each bunny (its instance's), then what only the CPU needs.
+Gpu_Bunny :: struct #c {
+    x:        f32
+    y:        f32
+    rotation: f32
+}
+
+Bunny :: struct {
+    gpu:        Gpu_Bunny
+    velocity_x: f32
+    velocity_y: f32
+}
+
+// An automated run's figures for one second.
+Second :: struct {
+    bunnies:  i64     // as it ended
+    frames:   i64
+    worst_dt: f32     // the slowest frame's time
+}
+
+// The square each bunny is drawn on: two triangles' corners, as UVs.
+SQUARE :: [12] f32⟨1, 0,  0, 0,  0, 1,  1, 0,  0, 1,  1, 1⟩
+
+SHADER :: #"HLSL
+#define PI 3.1415926538
+
+struct VSOut {
+    float4 vert : SV_POSITION;
+    float2 uv   : UV;
+};
+
+VSOut VS(float2 uv : TEXCOORD, float2 pos : POSITION, float rot : ROT, uint id : SV_InstanceID) {
+    float2 scale = float2(.05, .1);
+    VSOut o;
+    float rads = -rot * PI / 180;
+    float2 p = float2(uv.x, uv.y) - .5;
+    float2 q;
+    q.x = p.x * cos(rads) - p.y * sin(rads);
+    q.y = p.x * sin(rads) + p.y * cos(rads);
+    o.vert = float4(q * scale + pos, 0, 1);
+    o.uv = float2(1.0 / 12 * (id / 1000 % 12), 1 - uv.y); // the texture is upside down, so the UVs are flipped
+    if (uv.x == 1) o.uv.x += 1.0 / 12;
+    return o;
+}
+
+Texture2D my_texture;
+SamplerState my_sampler;
+float4 PS(VSOut input) : SV_Target {
+    float4 color = my_texture.Sample(my_sampler, input.uv);
+    clip(color.a < 0.5 ? -1 : 1);
+    return color;
+}
+HLSL"#
+
+main :: (args: [] string) [failed: string] {
+    *automated := false
+    *auto_seconds := 20
+    for arg: args[1:] {
+        if arg == "-auto" {
+            automated = true
+        } else if arg.starts_with("-seconds:") {
+            if n := String.to_i64(arg[9:]) { auto_seconds = n } else if invalid or too_big { fail: failed = "-seconds: takes a number" }
+        } else {
+            fail: failed = "usage: bunnymark [-auto] [-seconds:N]"
+        }
+    }
+
+    if w :=Window.create_window("Bunnymark", WINDOW_SIZE) is os_error then fail: failed = "can't make the window"
+    // (a blt swap chain, as the Jai version's: in a window, without vsync,
+    // some GPUs draw twice the frames a second this way as flipped)
+    if *graphics := D3D11.create_device(w.handle, vsync: VSYNC, presentation: .BLT) is d3d_error then fail: failed = "no Direct3D 11 device (HRESULT «d3d_error»)"
+    device := graphics.device
+    context := graphics.context
+
+    //- the shaders, and how the square's corners (slot 0) and the bunnies
+    //- (slot 1, one each instance) go in
+    if vertex_code := D3D11.compile_shader(SHADER, "VS", "vs_4_0") is compile_error then fail: failed = compile_error
+    if pixel_code := D3D11.compile_shader(SHADER, "PS", "ps_4_0") is compile_error then fail: failed = compile_error
+    if vertex_shader := device.create_vertex_shader(vertex_code, null) is d3d_error then fail: failed = "create_vertex_shader: «d3d_error»"
+    if pixel_shader := device.create_pixel_shader(pixel_code, null) is d3d_error then fail: failed = "create_pixel_shader: «d3d_error»"
+    elements := [] D3D11.Input_Element_Desc⟨
+        ⟨semantic_name: "TEXCOORD".data, format: .R32G32_FLOAT, input_slot: 0, aligned_byte_offset: D3D11.APPEND_ALIGNED_ELEMENT, input_slot_class: .VERTEX_DATA⟩,
+        ⟨semantic_name: "POSITION".data, format: .R32G32_FLOAT, input_slot: 1, aligned_byte_offset: D3D11.APPEND_ALIGNED_ELEMENT,
+         input_slot_class: .INSTANCE_DATA, instance_data_step_rate: 1⟩,
+        ⟨semantic_name: "ROT".data, format: .R32_FLOAT, input_slot: 1, aligned_byte_offset: D3D11.APPEND_ALIGNED_ELEMENT,
+         input_slot_class: .INSTANCE_DATA, instance_data_step_rate: 1⟩⟩
+    if layout := device.create_input_layout(elements, vertex_code) is d3d_error then fail: failed = "create_input_layout: «d3d_error»"
+
+    //- the square, and the bunnies' instance buffer, written each frame
+    *square_data := D3D11.Subresource_Data⟨sys_mem: ^void'^SQUARE[0]⟩
+    square_desc := D3D11.Buffer_Desc⟨byte_width: u32'size_of(type_of(SQUARE)), usage: .IMMUTABLE, bind_flags: .VERTEX_BUFFER⟩
+    if square := device.create_buffer(square_desc, ^square_data) is d3d_error then fail: failed = "the square's buffer: «d3d_error»"
+    instance_desc := D3D11.Buffer_Desc⟨byte_width: u32'(MAX_BUNNIES * size_of(Gpu_Bunny)), usage: .DYNAMIC, bind_flags: .VERTEX_BUFFER,
+                                       cpu_access_flags: .WRITE⟩
+    if instances := device.create_buffer(instance_desc, null) is d3d_error then fail: failed = "the instance buffer: «d3d_error»"
+
+    //- the bunnies' picture (12 of them in a row) and how it's sampled
+    if picture_size, pixels := Image_Files.decode_image(BUNNIES_PNG) is bad_image then fail: failed = "bunnies.png isn't a picture"
+    *picture_data := D3D11.Subresource_Data⟨sys_mem: ^void'^pixels[0], sys_mem_pitch: u32'(picture_size[0] * 4)⟩
+    texture_desc := D3D11.Texture_2D_Desc⟨width: u32'picture_size[0], height: u32'picture_size[1], mip_levels: 1, array_size: 1,
+                                          format: .B8G8R8A8_UNORM_SRGB, sample_desc: ⟨count: 1⟩, usage: .IMMUTABLE, bind_flags: .SHADER_RESOURCE⟩
+    if texture := device.create_texture_2d(texture_desc, ^picture_data) is d3d_error then fail: failed = "the texture: «d3d_error»"
+    if texture_view := device.create_shader_resource_view(D3D11.Resource'texture, null) is d3d_error then fail: failed = "its view: «d3d_error»"
+    sampler_desc := D3D11.Sampler_Desc⟨filter: .MIN_MAG_MIP_LINEAR, address_u: .CLAMP, address_v: .CLAMP, address_w: .CLAMP, max_anisotropy: 1,
+                                       comparison_func: .NEVER, border_color: ⟨1, 1, 1, 1⟩, min_lod: -1_000_000_000, max_lod: 1_000_000_000⟩
+    if sampler := device.create_sampler_state(sampler_desc) is d3d_error then fail: failed = "the sampler: «d3d_error»"
+
+    *random := Random.generator(seed: 1)
+    *bunnies: [..] Bunny = ⟨max_count: MAX_BUNNIES⟩
+    for k: 0 < INITIAL_BUNNY_COUNT { bunnies.add(new_bunny(random, bunnies.count, 0, 0)) }
+
+    *size := w.size
+    *last_time := Time.seconds_since_start()
+    *fps_time := last_time
+    *fps_frames := 0
+    *max_dt: f32 = 0
+    *mapped_once := false
+    *auto_start: f64 = -1
+    *seconds: [..] Second
+    *this_second: Second
+    while Window.update_windows() {
+        if w.close_requested or w.keys[.ESCAPE] & .PRESSED {
+            w.destroy()
+            continue
+        }
+        if w.size != size {
+            size = w.size
+            if graphics.resize() is d3d_error then fail: failed = "resize: «d3d_error»"
+        }
+
+        //- the time since the last frame, and the title's figures each half second
+        now := Time.seconds_since_start()
+        dt := f32'(now - last_time)
+        last_time = now
+        if dt > max_dt then max_dt = dt
+        fps_frames += 1
+        if now - fps_time >= 0.5 {
+            fps := i64'(f64'fps_frames / (now - fps_time) + 0.5)
+            worst := if max_dt > 0 then i64'(1 / max_dt + 0.5) else 0
+            title := "Bunnymark rain D3D11 | FPS: «fps» | 0% Low: «worst» | Buns: «bunnies.count»"
+            w.set_title(title)
+            fps_time = now
+            fps_frames = 0
+            max_dt = 0
+        }
+
+        //- an automated run's figures, each second (the first frame, which
+        //- waited on everything made before it, isn't counted)
+        if automated {
+            if auto_start < 0 {
+                auto_start = now
+            } else {
+                this_second.frames += 1
+                if dt > this_second.worst_dt then this_second.worst_dt = dt
+                if now - auto_start >= f64'(seconds.count + 1) {
+                    this_second.bunnies = bunnies.count
+                    seconds.add(this_second)
+                    this_second = ⟨⟩
+                }
+            }
+        }
+
+        //- bunnies added where the mouse is, while its left button's down
+        //- (or, automated, by the time, somewhere at random)
+        if automated or w.mouse.buttons[.LEFT] & .HELD {
+            *mouse_x := f32'w.mouse.position[0]
+            *mouse_y := f32'w.mouse.position[1]
+            *adding := i64'(BUNNIES_TO_ADD_PER_SECOND * dt)
+            if automated {
+                mouse_x = random.between_f32(0, f32'size[0])
+                mouse_y = random.between_f32(0, f32'size[1])
+                adding = INITIAL_BUNNY_COUNT + i64'(BUNNIES_TO_ADD_PER_SECOND * (now - auto_start)) - bunnies.count
+            }
+            x := spread(mouse_x, f32'size[0], -1, 1)
+            y := spread(mouse_y, f32'size[1], 1, -1)
+            for k: 0 < adding {
+                if bunnies.count == MAX_BUNNIES then break
+                bunnies.add(new_bunny(random, bunnies.count, x, y))
+            }
+        }
+
+        //- each bunny moved
+        for *bunny: bunnies { update(bunny, random, dt) }
+
+        //- drawn: each bunny's position and rotation into the instance buffer,
+        //- then one draw of them all
+        if target := graphics.back_buffer_view() is d3d_error then fail: failed = "back_buffer_view: «d3d_error»"
+        context.clear_render_target_view(target, ⟨0, 0, 0, 0⟩)
+        context.om_set_render_targets(⟨target⟩, null)
+        context.rs_set_viewports(⟨⟨width: f32'size[0], height: f32'size[1], max_depth: 1⟩⟩)
+        // (the first map discards, as a dynamic buffer's first must; then, as
+        // the Jai version does, each writes without waiting on the GPU)
+        how: D3D11.Map = if mapped_once then .WRITE_NO_OVERWRITE else .WRITE_DISCARD
+        mapped_once = true
+        if mapped := context.map(D3D11.Resource'instances, 0, how, D3D11.Map_Flag'0) is d3d_error then fail: failed = "map: «d3d_error»"
+        gpu := ^Gpu_Bunny'mapped.data
+        for bunny, k: bunnies { (gpu ++ k)^ = bunny.gpu }
+        context.unmap(D3D11.Resource'instances, 0)
+        context.ia_set_input_layout(layout)
+        context.ia_set_primitive_topology(.TRIANGLELIST)
+        context.ia_set_vertex_buffers(0, ⟨square, instances⟩, ⟨u32'(2 * size_of(f32)), u32'size_of(Gpu_Bunny)⟩, ⟨0, 0⟩)
+        context.vs_set_shader(vertex_shader, ⟨⟩)
+        context.ps_set_shader(pixel_shader, ⟨⟩)
+        context.ps_set_shader_resources(0, ⟨texture_view⟩)
+        context.ps_set_samplers(0, ⟨sampler⟩)
+        context.draw_instanced(6, u32'bunnies.count, 0, 0)
+        if graphics.present() is d3d_error then fail: failed = "present: «d3d_error»"
+        scratch.reset()
+        if automated and seconds.count >= auto_seconds then break
+    }
+    sampler.release()
+    texture_view.release()
+    texture.release()
+    instances.release()
+    square.release()
+    layout.release()
+    pixel_shader.release()
+    vertex_shader.release()
+    graphics.destroy()
+
+    if automated and seconds.count > 0 {
+        echo("rain: second, bunnies, frames, slowest frame's fps")
+        *frames := 0
+        for s, k: seconds {
+            echo("«k + 1», «s.bunnies», «s.frames», «i64'(1 / s.worst_dt + 0.5)»")
+            frames += s.frames
+        }
+        average := i64'(f64'frames / f64'seconds.count + 0.5)
+        echo("rain: «frames» frames in «seconds.count» seconds, «average» fps on average, «seconds[# - 1].bunnies» bunnies at the end")
+    }
+}
+
+// A bunny where (x, y) is: its velocity at random, and its rotation, to
+// start, its number.
+new_bunny :: (random: *Random.Generator, number: i64, x: f32, y: f32 -> Bunny) {
+    return ⟨gpu: ⟨x, y, f32'number⟩, velocity_x: random.between_f32(-1, 1), velocity_y: random.between_f32(-1, 1)⟩
+}
+
+// A bunny moved: falling, spinning as fast as it's going sideways,
+// bouncing off the floor (sometimes high) and the walls.
+update :: (bunny: *Bunny, random: *Random.Generator, dt: f32) {
+    bunny.velocity_y -= GRAVITY * dt
+    bunny.gpu.x += bunny.velocity_x * dt
+    bunny.gpu.y += bunny.velocity_y * dt
+    bunny.gpu.rotation += bunny.velocity_x * 360 * dt
+    if bunny.gpu.y < -1 {
+        // (the commonest case: the floor)
+        bunny.gpu.y = -1
+        bunny.velocity_y *= -0.85 / 2
+        if random.chance(f64'(0.5 * dt * 1000)) then bunny.velocity_y += random.unit_f32() * 2
+    } else if bunny.gpu.x > 1 {
+        bunny.velocity_x = -abs(bunny.velocity_x)
+    } else if bunny.gpu.x < -1 {
+        bunny.velocity_x = abs(bunny.velocity_x)
+    }
+}
+
+abs :: (x: f32 -> f32) { return if x < 0 then -x else x }
+
+// value from 0 to most as from to to, clamped to them.
+spread :: (value: f32, most: f32, from: f32, to: f32 -> f32) {
+    *ratio := if most > 0 then value / most else 0
+    if ratio < 0 then ratio = 0
+    if ratio > 1 then ratio = 1
+    return from + (to - from) * ratio
+}

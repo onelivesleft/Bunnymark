@@ -13,8 +13,7 @@
 
 
 
-#if  DEBUG #import "d3d11"()(INCLUDE_DEBUG_BINDINGS = true);
-#if !DEBUG #import "d3d11";
+#import "d3d11"()(INCLUDE_DEBUG_BINDINGS = DEBUG);
 
 #import "d3d_compiler";
 #import "dxgi";
@@ -179,7 +178,6 @@ load_texture_from_memory :: (filebytes: []u8) -> GpuTexture {
 }
 _load_texture :: (data: *u8, w: s32, h: s32, channels: s32) -> GpuTexture {
 
-  ensure_default_texture_sampler();
   ensure_default_texture_sampler :: () {
     Global(#code default_texture_sampler: *ID3D11SamplerState);
     if default_texture_sampler  return;
@@ -205,6 +203,7 @@ _load_texture :: (data: *u8, w: s32, h: s32, channels: s32) -> GpuTexture {
 
       ID3D11DeviceContext_PSSetSamplers(d3d_context, 0, 1, *default_texture_sampler);
   }
+  ensure_default_texture_sampler();
 
   // dx texture
   image_texture_desc: D3D11_TEXTURE2D_DESC;
@@ -346,7 +345,7 @@ for_expansion :: (buffer: GpuBuffer, body: Code, flags: For_Flags) #expand {
   }
   ID3D11DeviceContext_Unmap(d3d_context, *buffer, 0);
 }
-gpu_alloc :: (count: u32, $T: Type, data: *void = null) -> GpuBuffer #must {
+gpu_alloc :: (count: u32, $T: Type, data: *void = null) -> GpuBuffer {
   gpu_buffer: GpuBuffer;
   gpu_buffer.type_size = size_of(T);
   gpu_buffer.count = xx count;

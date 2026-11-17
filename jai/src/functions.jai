@@ -21,10 +21,10 @@ fps_man: struct {
   update :: (using instance: *type_of(fps_man)) {
     frame_count += 1;
 
-    elapsed := get_time() - last_time;
+    elapsed := seconds_since_init() - last_time;
     if elapsed < .5  return;
 
-    last_time = get_time();
+    last_time = seconds_since_init();
     fps = round( (frame_count - last_frame_count) / elapsed );
     last_frame_count = frame_count;
     ready = true;
@@ -38,7 +38,7 @@ dt_man: struct {
   last_time: float64;
 
   update :: (using instance: *type_of(dt_man)) {
-    now := get_time();
+    now := seconds_since_init();
     dt = xx (now - last_time);
     last_time = now;
   }
@@ -111,11 +111,11 @@ die :: (args: ..Any) {mylog("[Fatal Error]"); mylog(..args); exit(1); }
 
 Global :: (str: string) #expand {
   Compiler :: #import "Compiler";
-  #run Compiler.add_build_string(str);
+  #run Compiler.add_build_string(str, get_current_workspace());
 }
 Global :: (code: Code) #expand {
   Compiler :: #import "Compiler";
-  #run Compiler.add_build_string(tprint("%;", code2string(code)));
+  #run Compiler.add_build_string(tprint("%;", code2string(code)), get_current_workspace());
 }
 code2string :: (code: Code) -> string #expand {
   PP       :: #import "Program_Print";
@@ -123,7 +123,7 @@ code2string :: (code: Code) -> string #expand {
   code_node := Compiler.compiler_get_nodes(code);
   builder: String_Builder;
   PP.print_expression(*builder, code_node);
-  return builder_to_string(*builder, allocator=temp);
+  return builder_to_string(*builder,, allocator=temp);
 }
 
 window_size :: (hwnd: WC.Window_Type) -> w: s32, h: s32 {
@@ -159,7 +159,7 @@ mapnumber :: (value: float, from1: float, from2: float, to1: float, to2:float, e
   return bdist*ratio + to1;
 }
 
-RELEASE :: #run () -> bool {Compiler :: #import "Compiler"; return Compiler.get_build_options().optimization_level == .RELEASE; }();
+// (RELEASE is first.jai's, given to the program as a constant.)
 
 parse_compile_time_argument_from_command_line_flag :: cmdline_flag;
 cmdline_flag :: (varname: string, or: $T) -> bool
@@ -223,8 +223,7 @@ embed_file :: (file_path: string) -> []u8 {
 sprinti :: #bake_arguments string_interpolation(allocator = .{});
 tprinti :: #bake_arguments string_interpolation(allocator = temp);
 // printi  :: ($str: string, caller_scope := #caller_code) #expand {print(tprinti(str, caller_scope=caller_scope)); } // should this exist? but then what about logi, etc
-_       :: string_interpolation;
-// $       :: string_interpolation; // $ isn't a valid identifier ezsadge
+// (_ and $ aren't identifiers, so it's interp)
 interp  :: string_interpolation;
 string_interpolation :: ($_str: string, allocator: Allocator = temp, caller_scope := #caller_code) -> string #expand {
   a := ifx allocator.proc then allocator else context.allocator;
@@ -248,9 +247,10 @@ string_interpolation :: ($_str: string, allocator: Allocator = temp, caller_scop
 
       is_start_of_interpolated_code := (str[i] == #char"#" || str[i] == #char"%" || str[i] == #char"$") && (i+1 < str.count-1 && str[i+1] == #char"{");
 
-      // if this character is a % that's not part of code, transform it into %% so it's interpreted as a normal %
+      // if this character is a % that's not part of code, transform it into \% so it's interpreted as a normal %
+      // (print's literal %: the escape \% in the generated string literal)
       if !is_start_of_interpolated_code && str[i] == #char"%" {
-        append(*format_str, "%%");
+        append(*format_str, "\\%");
         continue;
       }
 

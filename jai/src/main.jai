@@ -5,6 +5,7 @@
 
 #load "indirectx.jai";
 #load "functions.jai";
+#import "Rain_Profile";
 
 
 window_width              :: 1920/2;
@@ -27,10 +28,14 @@ DEPTH_BUFFER              :: false;
 
 WRITE_ONLY_NECESSARY_DATA_TO_GPU :: true;
 JUNK_BYTES                       :: 0; // 1024; // extra unnecessary bytes to store in the Bunny structure
-DEBUG                            :: #run cmdline_flag("DEBUG", or=false); // disables shader optimization
+// DEBUG (jai first.jai - DEBUG: disables shader optimization) and RELEASE are
+// given by first.jai.
 
 
 main :: () {
+
+  parse_arguments();
+  start_profile();   // (does nothing unless -profile:path set RAIN_PROFILE)
 
   windows_improve_performance();
 
@@ -52,7 +57,72 @@ main :: () {
 
     tfree();
 
+    if auto_mode && seconds_recorded.count >= auto_seconds  break;
   }
+
+  finish_profile();
+  print_results();
+}
+
+
+// Automated runs: bunnymark -auto [-seconds:20] [-profile:bunnymark.profile]
+// acts as if the left button were held throughout, with the mouse at a random
+// place in the window each frame, and adds bunnies by the time since the first
+// frame (10,000 a second), so every run has as many at the same time, however
+// fast it goes. It ends after that many seconds, then prints each second's
+// bunnies, frames and slowest frame: only then, so printing costs the run
+// nothing. -profile:path samples it with Rain_Profile, for rain -report:path.
+auto_mode    := false;
+auto_seconds := 20;
+auto_start   : float64 = -1;
+
+Second :: struct { bunnies: int; frames: int; worst_dt: float64; }
+seconds_recorded: [..] Second;
+this_second: Second;
+
+kernel32_system :: #library,system "kernel32";
+SetEnvironmentVariableW :: (name: *u16, value: *u16) -> s32 #foreign kernel32_system;
+#import "String";
+
+parse_arguments :: () {
+  for get_command_line_arguments() {
+    if it_index == 0  continue;
+    if it == "-auto"  auto_mode = true;
+    else if begins_with(it, "-seconds:") {
+      n, ok := string_to_int(slice(it, 9, it.count - 9));
+      if ok && n > 0  auto_seconds = n;
+    }
+    else if begins_with(it, "-profile:") {
+      SetEnvironmentVariableW(utf8_to_wide("RAIN_PROFILE"), utf8_to_wide(slice(it, 9, it.count - 9)));
+    }
+  }
+}
+
+// Each second's figures, kept as the run goes (the first frame, which waited
+// on everything made before it, isn't counted).
+record_frame :: () {
+  now := seconds_since_init();
+  if auto_start < 0 { auto_start = now; return; }
+  this_second.frames += 1;
+  if dt > this_second.worst_dt  this_second.worst_dt = dt;
+  if now - auto_start >= cast(float64) (seconds_recorded.count + 1) {
+    this_second.bunnies = bunnies.count;
+    array_add(*seconds_recorded, this_second);
+    this_second = .{};
+  }
+}
+
+print_results :: () {
+  if !auto_mode || seconds_recorded.count == 0  return;
+  print("Jai: second, bunnies, frames, slowest frame's fps\n");
+  frames := 0;
+  for seconds_recorded {
+    print("%, %, %, %\n", it_index + 1, it.bunnies, it.frames, round(1.0 / it.worst_dt));
+    frames += it.frames;
+  }
+  print("Jai: % frames in % seconds, % fps on average, % bunnies at the end\n",
+    frames, seconds_recorded.count, round(cast(float64) frames / seconds_recorded.count),
+    seconds_recorded[seconds_recorded.count - 1].bunnies);
 }
 
 
@@ -74,25 +144,36 @@ update :: () {
   fps_man.update(*fps_man);
   dt_man.update(*dt_man);
   dt = dt_man.dt;
+  if auto_mode  record_frame();
 
   // update window title with stats every once in a while
     Global(#code max_dt: float64);
     if dt > max_dt max_dt = dt;
     if fps_man.ready { fps_man.ready = false;
       worst_fps := round(1.0 / max_dt);
-      set_window_title(_("Bunnymark Jai D3D11 | FPS: #{fps_man.fps} | 0% Low: #{worst_fps} | Buns: #{bunnies.count}"));
+      set_window_title(interp("Bunnymark Jai D3D11 | FPS: #{fps_man.fps} | 0% Low: #{worst_fps} | Buns: #{bunnies.count}"));
       max_dt = 0;
     }
 
 
   // add bunnies if mousedown
-    if ismousedown {
-      mousepos := Mouse.pos(hwnd);
+    if ismousedown || auto_mode {
       w, h := window_size(hwnd);
+      mouse_x, mouse_y: float;
       amount_to_add_this_frame : int = xx (BUNNIES_TO_ADD_PER_SECOND * dt);
+      if auto_mode {
+        mouse_x = random_get_within_range(0, xx w);
+        mouse_y = random_get_within_range(0, xx h);
+        target := INITIAL_BUNNY_COUNT + cast(int) (BUNNIES_TO_ADD_PER_SECOND * (seconds_since_init() - auto_start));
+        amount_to_add_this_frame = min(target, MAX_BUNNIES) - bunnies.count;
+      } else {
+        mousepos := Mouse.pos(hwnd);
+        mouse_x = xx mousepos.x;
+        mouse_y = xx mousepos.y;
+      }
       for i: 0..amount_to_add_this_frame-1 #no_abc {
-        bunnies[bunnies.count].x = mapnumber(xx mousepos.x, 0,xx w, -1,  1);
-        bunnies[bunnies.count].y = mapnumber(xx mousepos.y, 0,xx h,  1, -1);
+        bunnies[bunnies.count].x = mapnumber(mouse_x, 0,xx w, -1,  1);
+        bunnies[bunnies.count].y = mapnumber(mouse_y, 0,xx h,  1, -1);
         bunnies.count += 1;
       }
     }
@@ -118,7 +199,7 @@ maybe_fps_limit :: () #expand {
   #if FPS_LIMIT {
     Global(#code fps_limit_last_frame_time: float64);
 
-    now := get_time() * 1000;
+    now := seconds_since_init() * 1000;
     ms_per_fame :: 1000.0 / FPS_LIMIT;
     ms_since_last_frame := now - fps_limit_last_frame_time;
     ms_until_next_frame := ms_per_fame - ms_since_last_frame;
@@ -242,7 +323,7 @@ init_instance_buffer :: () {
 }
 
 init_load_textures :: () {
-  bunnies_png_bytes :: #run embed_file("assets/bunnies.png");
+  bunnies_png_bytes :: #run embed_file("../assets/bunnies.png");
   bunny_texture := load_texture_from_memory(bunnies_png_bytes);
   bind_texture(0, bunny_texture);
 }
@@ -257,9 +338,7 @@ init_bunny_shader :: () {
     #if ROTATION
     layout_add(*layout, "ROT"     , buffer_slot=1, instanced=1, size=size_of(type_of(Bunny.rotation)));
 
-  bunny_shader = make_shader(bunny_shader_text, layout);
-
-  bunny_shader_text :: #run _(#string HLSL
+  bunny_shader_text :: #run interp(#string HLSL
     #define PI 3.1415926538
     #define ROTATION %{ifx ROTATION 1 else 0}
 
@@ -312,6 +391,8 @@ init_bunny_shader :: () {
       return color;
     }
   HLSL);
+
+  bunny_shader = make_shader(bunny_shader_text, layout);
 }
 
 // note: alt+f4 doesn't close the app because modules/input/windows.jai needs this code in case WM_SYSKEYDOWN;
