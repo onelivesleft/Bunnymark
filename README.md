@@ -13,7 +13,7 @@ picture in `assets/` shared: the original in Jai (by farzher), and a port to
 
 ## Building
 
-- `jai/`, with #the_compiler(v0.2.30): in `jai/`, run `run.bat` (optimized,
+- `jai/`, with Jai v0.2.30: in `jai/`, run `run.bat` (optimized,
   `jai first.jai -o`), or `run-debug.bat` (`jai first.jai - DEBUG`: shaders
   unoptimized, D3D11's debug bindings).
 - `rain/`, on 'rain's D3D11 module, with its Random module's xoshiro256** for
